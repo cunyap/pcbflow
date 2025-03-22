@@ -138,45 +138,69 @@ class KiCadPart(PCBPart):
                 )
 
     def _map_layers(self, layers):
+        # Ensure 'layers' is always a list
+        if isinstance(layers, str):
+            layers = [layers]  # Convert single string into a list
+
         ml = []
         for layer in layers:
-            if layer in KI_LAYER_DICT:
-                ml.append(KI_LAYER_DICT[layer])
+            clean_layer = layer.strip('"')  # Remove any extra quotes
+            if clean_layer in KI_LAYER_DICT:
+                ml.append(KI_LAYER_DICT[clean_layer])
+
         return ml
 
     def _parse_fp_text(self, items):
         xy = []
-        layers = []
+        layer = "F.Cu"  # Default layer if mapping fails
         text = items[0]
+
         for e in items:
             if isinstance(e, dict):
                 if "at" in e:
                     xy = float(e["at"][0]), -float(e["at"][1])
                 elif "layer" in e:
-                    layer = self._map_layers(e["layer"])[0]
+                    mapped_layers = self._map_layers(e["layer"])
+                    if mapped_layers:
+                        layer = mapped_layers[0]  # Use the first mapped layer
+                    else:
+                        print(f"Warning: Could not map layer '{e['layer']}', using default '{layer}'")
+
         if text == "reference":
             self.labels.append({"xy": xy, "text": text, "layer": layer})
 
     def _parse_fp_poly(self, items):
         coords = []
-        fill=True
+        fill = True
+        width = 0.0  # Default value
+        layer = "F.Cu"  # Default layer (or use a sensible default)
+
         for e in items:
             if isinstance(e, dict):
                 if "pts" in e:
                     for pt in e["pts"]:
                         coords.append((float(pt[2]), -float(pt[3])))
+
                 elif "width" in e:
                     width = float(e["width"][0])
+
                 elif "stroke" in e:
-                    for ln,key,val in e['stroke']:
+                    for ln, key, val in e["stroke"]:
                         if "width" in key:
-                            width=float(val)
+                            width = float(val)
+
                 elif "fill" in e:
-                    if 'none' in e['fill']:
-                        fill=False    
+                    if "none" in e["fill"]:
+                        fill = False
+
                 elif "layer" in e:
-                    layer = self._map_layers(e["layer"])[0]
-        self.polys.append({"coords": coords, "width": width, "layer": layer, "fill":fill})
+                    mapped_layers = self._map_layers(e["layer"])
+                    if mapped_layers:  # Ensure the list is not empty
+                        layer = mapped_layers[0]
+                    else:
+                        print(f"Warning: Unknown layer '{e['layer']}', using default '{layer}'")
+
+        self.polys.append({"coords": coords, "width": width, "layer": layer, "fill": fill})
 
     def _parse_fp_circle(self, items):
         center = (0, 0)
@@ -328,42 +352,55 @@ class KiCadPart(PCBPart):
 class SkiPart(KiCadPart):
     def __init__(self, dc, skipart, **kwargs):
         self.skipart = skipart
+        self.kicad_path = os.environ["KICAD_DIR"]
+        if not self.kicad_path:
+            raise FileNotFoundError("KiCad directory not found. Please set environment variable: KICAD_DIR")
         self.footprint = skipart.footprint
-        lfn = self._find_footprint_file(skipart.footprint)
+        self.libraryfile = self._find_footprint_file(skipart.footprint)
         super().__init__(
             dc,
             val=skipart.value,
-            libraryfile=lfn,
+            libraryfile=self.libraryfile,
             family=skipart.ref_prefix,
             ref=skipart.ref,
             **kwargs
         )
+        self._assign_pads()
+
+    def _find_footprint_file(self, footprint_name):
+        """
+        Find the footprint file associated with the given footprint name.
+        Modern KiCad versions (v5+) use library files and paths in a more structured way.
+        """
+
+        footprint_path = self._search_footprint_in_project(footprint_name)
+        if footprint_path:
+            return footprint_path
+
+        raise FileNotFoundError(f"Footprint file for '{footprint_name}' not found.")
+
+    def _search_footprint_in_project(self, footprint):
+        """
+        Search for the footprint within the current project directory.
+        """
+
+        kicad_dir = self.kicad_path
+        footprint_dir = os.path.join(kicad_dir, "footprints")
+
+        footprint_files = glob.glob(os.path.join(footprint_dir, f"**/{footprint}*.kicad_mod"), recursive=True)
+
+        if footprint_files:
+            return footprint_files[0] # TODO resolve if multiple footprints with same names exist
+        else:
+            return None
+
+    def _assign_pads(self):
+        """
+        Assign the correct nets to the pads based on the schematic pin connections.
+        This part of the logic remains the same, where pads are matched to their respective pins.
+        """
         for pad in self.pads:
             for pin in self.skipart.pins:
                 if str(pin.num) == str(pad.name):
                     if len(pin.nets) == 1:
                         pad.name = pin.nets[0].name
-
-    def _find_footprint_file(self, libraryfile):
-        from skidl import footprint_search_paths
-
-        global ALL_KICAD_MOD_FILES, FP_LIB_PATH
-        if ALL_KICAD_MOD_FILES is None:
-            for path in footprint_search_paths["kicad"]:
-                kicadfn = path + os.sep + "kicad_common"
-                if os.path.isfile(full_path(kicadfn)):
-                    with open(kicadfn, "r") as f:
-                        kf = f.readlines()
-                    for line in kf:
-                        ls = line.split("=")
-                        if ls[0] == "KISYSMOD":
-                            FP_LIB_PATH = ls[1].rstrip()
-            if FP_LIB_PATH is None:
-                raise FileNotFoundError("Unable to find KiCAD footprints directory")
-            ALL_KICAD_MOD_FILES = glob.glob(
-                FP_LIB_PATH + os.sep + "**/*.kicad_mod", recursive=True
-            )
-        for f in ALL_KICAD_MOD_FILES:
-            if libraryfile in f:
-                return f
-        return None

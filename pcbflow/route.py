@@ -232,3 +232,22 @@ class Route(Turtle):
             t.left(th_d).forward((len(self.tt) - 1 - i) * a)
         self.wire()
         return self
+
+
+def autoroute_board(board, nets, width=0.3):
+    """Manually route all nets by connecting their associated pads."""
+    ckt = default_circuit
+
+    for net in nets:
+        pads = [pad for part in ckt.parts for pad in part.pads if pad.net == net]
+
+        if len(pads) < 2:
+            continue  # No need to route if there's only one pad
+
+        print(f"Routing {net.name} between {len(pads)} pads...")
+
+        # Start at the first pad and connect to the rest
+        start_pad = pads[0]
+        for pad in pads[1:]:
+            start_pad.w(f"f 5 r 90 f 5").wire(width=width)  # Simple straight routing
+            start_pad = pad  # Continue routing from the last position
